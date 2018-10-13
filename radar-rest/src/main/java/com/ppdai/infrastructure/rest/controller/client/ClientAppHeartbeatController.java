@@ -14,7 +14,6 @@ import java.util.concurrent.TimeUnit;
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 
-import org.apache.commons.lang3.RandomUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -38,7 +37,7 @@ import com.ppdai.infrastructure.radar.biz.service.InstanceService;
 @RequestMapping(RadarConstanst.INSTPRE)
 public class ClientAppHeartbeatController {
 	private static final Logger log = LoggerFactory.getLogger(ClientAppHeartbeatController.class);
-	private final Map<Long, Boolean> mapAppPolling = new ConcurrentHashMap<>(1000);
+	private final Map<Long, Boolean> mapAppPolling = new ConcurrentHashMap<>(2500);
 	@Autowired
 	private InstanceService instanceService;
 	@Autowired
@@ -53,9 +52,11 @@ public class ClientAppHeartbeatController {
 	private void init() {
 		heartBeatThreadSize = soaConfig.getHeartBeatThreadSize();
 		executor = new ThreadPoolExecutor(1, 1, 3L, TimeUnit.SECONDS, new ArrayBlockingQueue<>(10),
-				SoaThreadFactory.create("heartbeat", true), new ThreadPoolExecutor.CallerRunsPolicy());
+				SoaThreadFactory.create("heartbeat", Thread.MAX_PRIORITY, true),
+				new ThreadPoolExecutor.CallerRunsPolicy());
+
 		executorRun = new ThreadPoolExecutor(heartBeatThreadSize, heartBeatThreadSize, 10L, TimeUnit.SECONDS,
-				new ArrayBlockingQueue<>(1000), SoaThreadFactory.create("heartbeat-run", true),
+				new ArrayBlockingQueue<>(5000), SoaThreadFactory.create("heartbeat-run", Thread.MAX_PRIORITY - 1, true),
 				new ThreadPoolExecutor.CallerRunsPolicy());
 		soaConfig.registerChanged(new Runnable() {
 			@Override
@@ -86,10 +87,10 @@ public class ClientAppHeartbeatController {
 			if (mapAppPolling.size() > 0) {
 				log.info("doHeartBeat_start");
 				Transaction catTransaction = null;
-				try {
-					catTransaction = Tracer.newTransaction("Service",
-							"heartbeatBatch-" + soaConfig.getHeartbeatBatchSize());
+				try {					
 					Map<Long, Boolean> map = new HashMap<>(mapAppPolling);
+					catTransaction = Tracer.newTransaction("Service",
+							"heartbeatBatch-" + (map.size()-map.size()%10));
 					List<List<Long>> idss = Util.split(new ArrayList<>(map.keySet()),
 							soaConfig.getHeartbeatBatchSize());
 					CountDownLatch countDownLatch = new CountDownLatch(idss.size());
@@ -112,7 +113,7 @@ public class ClientAppHeartbeatController {
 				log.info("doHeartBeat_end");
 			}
 			// 通过随机的方式来避免数据库的洪峰压力
-			Util.sleep(RandomUtils.nextInt(1, soaConfig.getHeartbeatSleepTime()));
+			Util.sleep(soaConfig.getHeartbeatSleepTime());
 		}
 
 	}
@@ -135,7 +136,6 @@ public class ClientAppHeartbeatController {
 			catTransaction.setStatus(e);
 		}
 		catTransaction.complete();
-
 	}
 
 	private void logMethod(long id, String action) {
@@ -151,6 +151,22 @@ public class ClientAppHeartbeatController {
 		if (soaConfig.isFullLog()) {
 			logMethod(request.getInstanceId(), " heart_begin");
 		}
+		if (soaConfig.getHeartBeatAsyn()) {
+			asynHeartBeat(request);
+		} else {
+			synHeartBeat(request);
+		}
+		if (soaConfig.isFullLog()) {
+			logMethod(request.getInstanceId(), " heart_end_" + response.getHeartbeatTime());
+		}
+		return response;
+	}
+
+	private void synHeartBeat(HeartBeatRequest request) {
+		doHeartbeat(Arrays.asList(request.getInstanceId()));
+	}
+
+	private void asynHeartBeat(HeartBeatRequest request) {
 		try {
 			if (request != null) {
 				if (request.getInstanceId() > 0) {
@@ -166,10 +182,6 @@ public class ClientAppHeartbeatController {
 			// TODO Auto-generated catch block
 			e.printStackTrace();
 		}
-		if (soaConfig.isFullLog()) {
-			logMethod(request.getInstanceId(), " heart_end_" + response.getHeartbeatTime());
-		}
-		return response;
 	}
 
 }

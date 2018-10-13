@@ -8,6 +8,8 @@ import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -32,7 +34,6 @@ import com.ppdai.infrastructure.radar.biz.dto.client.GetAppMetaResponse;
 import com.ppdai.infrastructure.radar.biz.dto.client.GetAppRequest;
 import com.ppdai.infrastructure.radar.biz.dto.client.GetAppResponse;
 import com.ppdai.infrastructure.radar.biz.dto.client.HeartBeatRequest;
-import com.ppdai.infrastructure.radar.biz.dto.client.HeartBeatResponse;
 import com.ppdai.infrastructure.radar.biz.dto.client.RegisterInstanceRequest;
 import com.ppdai.infrastructure.radar.biz.dto.client.RegisterInstanceResponse;
 import com.ppdai.infrastructure.radar.biz.dto.pub.AdjustRequest;
@@ -56,14 +57,14 @@ public class DiscoveryClient {
 
 	private static final Logger logger = LoggerFactory.getLogger(DiscoveryClient.class);
 	private TraceMessage traceMessage = TraceFactory.getInstance("DiscoveryClient");
-	private TraceMessage traceMessageHeartbeat = TraceFactory.getInstance("DiscoveryClient-heartbeat");
-	// 记录上次心跳时间
-	private volatile int lastHbIntervalSecs = 5;
 
 	private Lock lock = new ReentrantLock();
 
 	// 和注册中心服务端交互的客户端
 	private RadarResource radarClient;
+
+	// 和注册中心服务端交互的客户端
+	private RadarResource radarHeartbeatClient;
 	// 当前服务信息
 	private RadarInstance instance;
 	// 注册中心服务端返回的实例id
@@ -71,8 +72,10 @@ public class DiscoveryClient {
 	// 注册中心客户端的配置
 	private RadarClientConfig config;
 	// 心跳和数据刷新的调度器和线程池
-	private ExecutorService executor = new ThreadPoolExecutor(5, 5, 3L, TimeUnit.SECONDS, new ArrayBlockingQueue<>(100),
+	private ExecutorService executor = new ThreadPoolExecutor(3, 3, 3L, TimeUnit.SECONDS, new ArrayBlockingQueue<>(100),
 			SoaThreadFactory.create("DiscoveryClient", true), new ThreadPoolExecutor.DiscardOldestPolicy());
+
+	private ScheduledExecutorService heatBeatService = Executors.newScheduledThreadPool(1);
 	// 用于控制只启动一次
 	private AtomicBoolean isStartUp = new AtomicBoolean(false);
 	// 用于控制只设置一次
@@ -143,11 +146,14 @@ public class DiscoveryClient {
 			}
 			this.config = config;
 			this.radarClient = new RadarResourceIml(config.getRegistryUrl(),
-					new JsonHttpClientImpl(config.getConnectionTimeoutSecs(), config.getReadTimeoutSecs()));
+					new JsonHttpClientImpl(config.getConnectionTimeout()*1000L, config.getReadTimeout()*1000L));
+			this.radarHeartbeatClient = new RadarResourceIml(config.getRegistryUrl(),
+					new JsonHttpClientImpl(1500L, 1500L));
 			isInited.set(true);
-			//预加热一下
+			// 预加热一下
 			this.radarClient.hs();
-			
+			this.radarHeartbeatClient.hs();
+
 		}
 	}
 
@@ -225,7 +231,7 @@ public class DiscoveryClient {
 			AppChangedEvent changeEvent = new AppChangedEvent();
 			changeEvent.setChangedEvent(changedValue);
 			TraceMessageItem item = new TraceMessageItem();
-			//item.start();
+			// item.start();
 			item.status = "changed--" + System.currentTimeMillis();
 			// item.msg = JsonUtil.toJsonNull(changeEvent);
 			item.msg = "changed";
@@ -373,10 +379,7 @@ public class DiscoveryClient {
 		try {
 			if (isStartUp.compareAndSet(true, false)) {
 				try {
-					for (int i = 0; i < 10; i++) {
-						doDeregister();
-						break;
-					}
+					doDeregister();
 				} catch (Exception e) {
 					Thread.sleep(1000);
 				}
@@ -462,57 +465,33 @@ public class DiscoveryClient {
 	 * 开始心跳，注意只有provider才会发送心跳
 	 */
 	private void startHeartbeat() {
-		executor.execute(new Runnable() {
+		heatBeatService.scheduleAtFixedRate(new Runnable() {
 			@Override
 			public void run() {
-				int lastSleep = lastHbIntervalSecs;
-				while (true) {
-					try {
-						TraceMessageItem item=new TraceMessageItem();						
-						long st = System.currentTimeMillis();
-						try {
-							lastSleep = doHeartbeat();
-						} catch (Throwable t) {
-						}
-						long passed = System.currentTimeMillis() - st;
-						long sleep = lastSleep * 1000 - passed;
-						item.status="sleep time:"+String.valueOf((int)((sleep+999)/1000));
-						//logger.info("heartbeat:"+passed+"--"+sleep);
-						if (sleep > 0) {
-							try {
-								Thread.sleep(sleep);
-							} catch (InterruptedException e) {
-							}
-						}else{
-							item.status="sleepTime<0";
-						}
-						traceMessageHeartbeat.add(item);
-					} catch (Throwable throwable) {
-
-					}
+				try {
+					logger.debug("client_heartBeat_start");
+					doHeartbeat();
+					logger.debug("client_heartBeat_end");
+				} catch (Throwable t) {
 				}
 			}
-		});
+		}, 1, 5, TimeUnit.SECONDS);
 	}
 
 	/**
 	 * 发送心跳
 	 */
-	private int doHeartbeat() {
+	private void doHeartbeat() {
 		HeartBeatRequest request = new HeartBeatRequest();
 		request.setInstanceId(id);
-		try {
-			HeartBeatResponse response = radarClient.heartbeat(request);
-			if (response != null) {
-				int temp = response.getHeartbeatTime();
-				if (temp > 5) {
-					lastHbIntervalSecs = temp;
-				}
+		for (int i = 0; i < 2; i++) {
+			try {
+				this.radarHeartbeatClient.heartbeat(request);
+				break;
+			} catch (Throwable e) {
+				logger.warn("DiscoveryClient was unable to send heartbeat_error: " + e.getMessage(), e);
 			}
-		} catch (Throwable e) {
-			logger.warn("DiscoveryClient was unable to send heartbeat, error: " + e.getMessage(), e);
 		}
-		return lastHbIntervalSecs;
 	}
 
 	/**

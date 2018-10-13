@@ -24,20 +24,15 @@ public class JsonHttpClientImpl implements JsonHttpClient {
 	private static final MediaType JSONTYPE = MediaType.parse("application/json; charset=utf-8");
 
 	private OkHttpClient client;
-
-	public JsonHttpClientImpl(int connTimeout, int readTimeout) {
-		if (connTimeout < 35) {
-			connTimeout = 35;
-		}
-		if (readTimeout < 35) {
-			readTimeout = 35;
-		}
-		client = new OkHttpClient.Builder().connectTimeout(connTimeout, TimeUnit.SECONDS)
-				.readTimeout(readTimeout, TimeUnit.SECONDS).build();
+	
+	public JsonHttpClientImpl(Long connTimeout, Long readTimeout) {		
+		client = new OkHttpClient.Builder().connectTimeout(connTimeout, TimeUnit.MILLISECONDS)
+				.readTimeout(readTimeout, TimeUnit.MILLISECONDS).build();
 	}
 
+	
 	public JsonHttpClientImpl() {
-		this(35, 35);
+		this(35000L, 35000L);
 	}
 
 	@Override
@@ -46,12 +41,13 @@ public class JsonHttpClientImpl implements JsonHttpClient {
 		if (reqObj != null) {
 			json = JsonUtil.toJsonNull(reqObj);
 		}
-		RequestBody body = RequestBody.create(JSONTYPE, json);
-		Request request = new Request.Builder().url(url).post(body).build();
+		
 		Response response = null;
 		Transaction transaction = Tracer.newTransaction("radar-client", url);
 		long start = System.nanoTime();
 		try {
+			RequestBody body = RequestBody.create(JSONTYPE, json);
+			Request request = new Request.Builder().url(url).post(body).build();
 			response = client.newCall(request).execute();
 			// transaction.complete();
 			if (transaction != null) {
